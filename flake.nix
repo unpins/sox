@@ -55,7 +55,15 @@
       # Native (Linux + Darwin). Playback via the ./audio.nix built-in-driver libao.
       build = pkgs:
         let
-          ps = pkgs.pkgsStatic;
+          # libopus needs the arm64 meson-intrinsics fix on native aarch64-darwin
+          # (nixpkgs writes meson cpu_family = "arm64"; opus' meson.build only
+          # matches arm/aarch64 → "no intrinsics support for arm64"). SoX pulls
+          # libopus transitively via opusfile AND libsndfile, so patch it once in
+          # the package set. Inert on every other platform (just widens a match
+          # list). Same nativeFixes.libopus opus-tools uses.
+          ps = pkgs.pkgsStatic.extend (_: prev: {
+            libopus = ulib.nativeFixes.libopus prev;
+          });
           audioLibao = import ./audio.nix { lib = pkgs.lib // ulib; } ps;
 
           sox = (ps.sox.override {
@@ -91,6 +99,16 @@
                   'if (!f->filetype) f->filetype = getenv("AUDIODRIVER");
                 if (!f->filetype && file_count) f->filetype = "ao";'
             '';
+          } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+            # pkgsStatic on darwin can't suppress libtool's shared build (no
+            # static libSystem), so libsox builds as a .dylib and the sox
+            # frontend links it dynamically → fails the portability check. Force
+            # libtool to emit only the static archive so libsox folds into the
+            # binary (libSystem + system frameworks stay the only dynamic deps).
+            # Same fix lame/xz use. Gated on darwin so Linux/cross keep their hash.
+            postConfigure = (o.postConfigure or "") + ''
+              sed -i 's/^build_libtool_libs=yes$/build_libtool_libs=no/' libtool
+            '';
           });
         in
         ulib.withAliases pkgs
@@ -106,17 +124,25 @@
       # unix-guarded leaves. MP3 encode (lame) stays on.
       windowsBuild = pkgs:
         let
-          cross = ulib.mingwStaticCross pkgs;
           metaAllow = d: d.overrideAttrs (o: {
             meta = (o.meta or { }) // { platforms = pkgs.lib.platforms.all; broken = false; };
           });
-          sox = (cross.sox.override {
-            enableLibao = false;
-            enableLame = true;
-          }).overrideAttrs (o: {
-            meta = (o.meta or { }) // { platforms = pkgs.lib.platforms.all; broken = false; };
-            buildInputs = builtins.map metaAllow (o.buildInputs or [ ]);
-          });
+          # libtool swallows the stdenv's -static for the program link, so the
+          # gcc stack-protector runtime leaks in as a libssp-0.dll import.
+          # mingwStaticBinary adds libtool-aware LDFLAGS=-all-static at make-time
+          # so the final link resolves libssp.a (and every codec dep) statically
+          # → only system DLLs (KERNEL32/msvcrt/WINMM) remain.
+          sox = ulib.mingwStaticBinary {
+            pkg = (ulib.mingwStaticCross pkgs).sox;
+            staticDeps = {
+              enableLibao = false;
+              enableLame = true;
+            };
+            extraOverrides = old: {
+              meta = (old.meta or { }) // { platforms = pkgs.lib.platforms.all; broken = false; };
+              buildInputs = builtins.map metaAllow (old.buildInputs or [ ]);
+            };
+          };
         in
         ulib.withAliases pkgs
           {
