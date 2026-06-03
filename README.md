@@ -29,8 +29,6 @@ unpin install sox
 
 ## Programs
 
-One binary provides four commands:
-
 | command | what it does                                                     |
 | ------- | ---------------------------------------------------------------- |
 | `sox`   | convert and process audio, applying any chain of effects         |
