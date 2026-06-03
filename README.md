@@ -11,9 +11,25 @@ huge range of formats and effects (`sox` / `play` / `rec` / `soxi`).
 
 Part of the [unpins](https://unpins.org) project — native single-binary builds with no third-party runtime dependencies.
 
-## Tools
+## Usage
 
-One binary, dispatched on `argv[0]`:
+Run `sox` with [unpin](https://github.com/unpins/unpin):
+
+```bash
+unpin sox in.wav out.flac    # convert in.wav to out.flac
+```
+
+To install it onto your PATH:
+
+```bash
+unpin install sox
+```
+
+`unpin install sox` also creates the `play`, `rec`, and `soxi` commands.
+
+## Programs
+
+One binary provides four commands:
 
 | command | what it does                                                     |
 | ------- | ---------------------------------------------------------------- |
@@ -25,20 +41,6 @@ One binary, dispatched on `argv[0]`:
 `play` / `rec` talk to the OS sound system out of the box — PulseAudio/PipeWire
 (falling back to ALSA, then OSS) on Linux, CoreAudio on macOS, WMM on Windows —
 with no shared libraries alongside the binary.
-
-## Installation
-
-Install with [unpin](https://github.com/unpins/unpin):
-
-```bash
-unpin sox
-```
-
-Or run without installing:
-
-```bash
-unpin run sox -- play song.flac
-```
 
 ## Build locally
 
