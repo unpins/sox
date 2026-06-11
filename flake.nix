@@ -1,5 +1,5 @@
 {
-  description = "Standalone build of SoX (Sound eXchange) — the audio Swiss-army knife (sox / play / rec / soxi)";
+  description = "SoX (Sound eXchange), the audio Swiss-army knife (sox / play / rec / soxi), as a single self-contained binary";
 
   nixConfig = {
     extra-substituters = [ "https://unpins.cachix.org" ];
