@@ -45,12 +45,57 @@
   outputs = { self, unpins-lib }:
     let
       ulib = unpins-lib.lib;
+
+      # sox is C; build it under the unpin-llvm engine (clang/lld, static musl,
+      # single binary). Its codec/audio deps stay ordinary pkgsStatic `.a`s,
+      # linked as external native archives by the engine link.
+      #
+      # LTO is OFF: clang-21's whole-program LTO miscompiles libsox.c's version
+      # lazy-init — `static info = { …, /*version*/ NULL, … }; if (!info.version)
+      # info.version = sox_version();` — constant-propagating the initial NULL and
+      # dropping the runtime write, so `sox --version` prints "SoX v(null)"
+      # (verified: lto=false → "SoX v14.4.2"). That is only the visible symptom of
+      # an LTO codegen bug (same class as the darwin ffmpeg teardown miscompile,
+      # llvm/llvm-project#186922 / ziglang/zig#20198); other sox TUs could be
+      # silently miscompiled too, so drop LTO for the whole package rather than
+      # trust it here. sox is still a single static binary — LTO is an
+      # optimization, not required for the fold. Marginal size/speed cost, none to
+      # correctness.
+      engStdenv = pkgs:
+        let sp = pkgs.pkgsStatic; in
+        ulib.unpinAdapterStdenv {
+          inherit pkgs;
+          target = sp.stdenv.hostPlatform.config;
+          native = pkgs.stdenv.buildPlatform.system == pkgs.stdenv.hostPlatform.system;
+          cxx = false;
+          lto = false;
+          captureLinks = true;
+        };
     in
     ulib.mkStandaloneFlake {
       inherit self;
       name = "sox";
       smoke = [ "--version" ];
-      smokePattern = "SoX v";
+      # Match the real version, not a bare "SoX v" — the latter also matches the
+      # "SoX v(null)" an LTO-miscompiled build prints (see engStdenv), so it would
+      # silently pass a broken binary.
+      smokePattern = "SoX v14\\.4";
+      engine = "unpin-llvm";
+
+      # sox bakes a handful of plugin/data-dir path strings into the binary —
+      # libmagic's magic DB, pulseaudio's server/locale dirs, libao's and
+      # alsa-lib's dynamic-plugin dirs, and sox's own libsox plugin/LADSPA dirs.
+      # All are inert here: the binary is fully static (no dlopen — audio.nix
+      # compiles libao's drivers in, format handlers are built-in), and those
+      # /nix/store paths don't exist on a user's machine anyway. Scrub them so the
+      # shipped binary is 0-ref and portable.
+      removeReferences = [
+        "file-static"
+        "libpulseaudio"
+        "libao"
+        "alsa-lib"
+        "unstable-2021-05-09-lib"
+      ];
 
       # Native (Linux + Darwin). Playback via the ./audio.nix built-in-driver libao.
       build = pkgs:
@@ -61,12 +106,98 @@
           # libopus transitively via opusfile AND libsndfile, so patch it once in
           # the package set. Inert on every other platform (just widens a match
           # list). Same nativeFixes.libopus opus-tools uses.
-          ps = pkgs.pkgsStatic.extend (_: prev: {
+          ps = pkgs.pkgsStatic.extend (final: prev: {
             libopus = ulib.nativeFixes.libopus prev;
+            # libX11 (pulled on Linux via libao's playback chain
+            # libpulseaudio → dbus → libX11) has a configure probe that checks
+            # whether its cpp needs -undef to stop predefining `unix`. The
+            # engine's clang cpp keeps `unix` defined even under -undef, so the
+            # probe aborts ("defines unix with or without -undef. I don't know
+            # what to do."). RAWCPP only preprocesses X11's host-independent
+            # locale/compose text at build time, so hand it the build-host gcc
+            # cpp (which honors -undef); libX11 links in as a plain static .a
+            # regardless of which cpp cooked its data. Inert on darwin/windows
+            # (no X11 in the CoreAudio/WMM playback paths). Same fix ddcutil uses.
+            libx11 = prev.libx11.overrideAttrs (_: {
+              RAWCPP = "${final.buildPackages.stdenv.cc}/bin/cpp";
+            });
+            # libmpg123 (pulled by libsndfile for MP3 decode) builds its mpg123/
+            # out123 CLI programs even under nixpkgs' libOnly (that only drops the
+            # audio backends). Those programs fail the engine's whole-program LTO
+            # link (ld.lld: undefined symbol `fputs`), and we don't ship them —
+            # libsndfile needs only libmpg123.a. Select just that component
+            # (--disable-components --enable-libmpg123): no programs, no
+            # libout123/libsyn123, so the offending link never happens and the
+            # decode library is unchanged.
+            # fftw (single, pulled via libpulseaudio's equalizer module) forces
+            # --enable-openmp and links llvmPackages.openmp, but the engine's
+            # self-contained clang has no OpenMP runtime → configure aborts
+            # ("don't know how to enable OpenMP"). The OpenMP variant
+            # (libfftw3f_omp) is unused — pulseaudio links the serial libfftw3f —
+            # so drop OpenMP and keep pthreads threading (--enable-threads).
+            fftwFloat = prev.fftwFloat.overrideAttrs (o: {
+              configureFlags = final.lib.filter (f: f != "--enable-openmp")
+                (o.configureFlags or [ ]);
+              buildInputs = final.lib.filter (d: (d.pname or "") != "openmp")
+                (o.buildInputs or [ ]);
+            });
+            # lame's `#ifdef HAVE_XMMINTRIN_H` SSE paths (libmp3lame/{vector/
+            # xmm_quantize_sub,fft,quantize,lame}.c use `__m128`) don't compile on
+            # the i686 target's -march=i686 baseline (no SSE). configure defines
+            # HAVE_XMMINTRIN_H anyway: its probe compiles `_mm_sfence()` with
+            # clang's *default* i686 flags (SSE2-capable) BEFORE lame appends
+            # -march=i686 to CFLAGS, so it passes where the real -march=i686
+            # compile fails (gcc doesn't false-positive here). The i686 target
+            # deliberately assumes no SSE, so undefine the macro post-configure —
+            # every SSE block then compiles as its scalar fallback (the code ARM/
+            # PPC already use; MP3 encode unchanged). Gated to i686; x86_64 (SSE2
+            # baseline) keeps the vectorized paths and its hash.
+            lame = if final.stdenv.hostPlatform.isx86_32
+              then prev.lame.overrideAttrs (o: {
+                postConfigure = (o.postConfigure or "") + ''
+                  sed -i '/#define HAVE_XMMINTRIN_H 1/d' config.h
+                '';
+              })
+              else prev.lame;
+            # libvorbis' 32-bit-x86 CFLAGS case hardcodes `-mno-ieee-fp`, a
+            # GCC-only flag the engine clang rejects as a fatal unknown argument
+            # (x86_64 takes a different case, so it's unaffected). The flag only
+            # relaxes IEEE FP strictness for -ffast-math (already on); drop it so
+            # the i686 build compiles. Gated to i686 to keep other hashes.
+            libvorbis = if final.stdenv.hostPlatform.isx86_32
+              then prev.libvorbis.overrideAttrs (o: {
+                postPatch = (o.postPatch or "") + ''
+                  substituteInPlace configure --replace-fail ' -mno-ieee-fp' ""
+                '';
+              })
+              else prev.libvorbis;
+            # libmad's configure.ac appends a fistful of GCC-tuning flags
+            # (-fcse-follow-jumps/-fregmove/…) in its `$GCC = yes` branch — which
+            # the engine clang also takes (it sets __GNUC__), but clang rejects
+            # those flags as fatal "unknown argument". nixpkgs already strips
+            # -fforce-mem and re-runs autoconf; strip the remaining clang-hostile
+            # ones the same way (they're gcc micro-tuning; clang's -O2 covers it,
+            # decode output unchanged).
+            libmad = prev.libmad.overrideAttrs (o: {
+              postPatch = (o.postPatch or "") + ''
+                sed -i -E 's/-f(force-addr|thread-jumps|cse-follow-jumps|cse-skip-blocks|expensive-optimizations|regmove|schedule-insns2)//g' configure.ac
+              '';
+            });
+            libmpg123 = prev.libmpg123.overrideAttrs (o: {
+              configureFlags = (o.configureFlags or [ ])
+                ++ [ "--disable-components" "--enable-libmpg123" ];
+              # With only the library built there are no man pages, so the
+              # recipe's declared `man` output would be empty and nix errors
+              # ("failed to produce output path"). Materialize it.
+              postInstall = (o.postInstall or "") + ''
+                mkdir -p "$man"
+              '';
+            });
           });
           audioLibao = import ./audio.nix { lib = pkgs.lib // ulib; } ps;
 
           sox = (ps.sox.override {
+            stdenv = engStdenv pkgs;
             enableLibao = true;
             libao = audioLibao;
             # Native alsa backend shares libao's pipewire-static libasound.a (one
