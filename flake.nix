@@ -214,6 +214,18 @@
               export LIBAO_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs ao)"
               echo "unpins: LIBAO_LIBS=$LIBAO_LIBS"
               [ -n "$LIBAO_LIBS" ] || { echo "unpins: pkg-config could not resolve ao.pc"; exit 1; }
+              # Same static-link-test problem as libao, for libsndfile. SoX detects
+              # it with AC_CHECK_LIB(sndfile, sf_open_virtual, …, other-libs =
+              # $LIBSNDFILE_LIBS); a bare `-lsndfile` link test can't resolve
+              # libsndfile.a's undefined FLAC/vorbis/opus/mpg123 symbols under
+              # static musl, so the sndfile handler (caf/w64/mat/paf/pvf/sd2/sds/xi
+              # + the `sndfile` catch-all) is silently dropped even though
+              # libsndfile is a buildInput. Feed the full static chain from
+              # pkg-config so the test — and the final link — resolve. Without this
+              # the shipped libsndfile.a is dead weight.
+              export LIBSNDFILE_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs sndfile)"
+              echo "unpins: LIBSNDFILE_LIBS=$LIBSNDFILE_LIBS"
+              [ -n "$LIBSNDFILE_LIBS" ] || { echo "unpins: pkg-config could not resolve sndfile.pc"; exit 1; }
             '';
             # Make libao the default PLAYBACK device (file_count>0 ⇒ not `rec`,
             # which libao can't do — recording falls through to the native
