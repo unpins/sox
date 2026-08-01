@@ -11,8 +11,8 @@
   # SoX installs ONE real binary, `sox`, plus three argv[0] symlinks the upstream
   # install-exec-hook creates — `play`, `rec`, `soxi` — all dispatched on
   # basename(argv[0]) inside sox.c. So there's no multicall surgery: the canonical
-  # binary is already named after the package, and `lib.withAliases` just harvests
-  # the three symlinks into an UNPIN_META block so unpin recreates them at install.
+  # binary is already named after the package, and the shipping embed harvests the
+  # three symlinks itself so unpin recreates them at install.
   #
   # Live audio in a fully-static binary is the hard part. SoX's OWN device backends
   # (alsa.c / pulseaudio.c) can't carry it: the static ALSA backend dies on a modern
@@ -254,12 +254,7 @@
             '';
           });
         in
-        ulib.withAliases pkgs
-          {
-            primary = "sox";
-            aliasesFromSymlinksIn = "bin";
-          }
-          sox;
+        sox;
 
       # Windows via mingw. No alsa/pulse/libao (Linux device APIs); SoX's waveaudio
       # (WMM) backend is compiled in by configure on mingw and needs no extra libs
@@ -287,11 +282,6 @@
             };
           };
         in
-        ulib.withAliases pkgs
-          {
-            primary = "sox";
-            aliasesFromSymlinksIn = "bin";
-          }
-          sox;
+        sox;
     };
 }
