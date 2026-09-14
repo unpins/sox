@@ -34,9 +34,14 @@ unpin install sox
 | `rec`   | record from the sound device to a file                           |
 | `soxi`  | print format / header info for an audio file                     |
 
-`play` / `rec` talk to the OS sound system out of the box — PulseAudio/PipeWire
-(falling back to ALSA, then OSS) on Linux, CoreAudio on macOS, WMM on Windows —
-with no shared libraries alongside the binary.
+`play` and `rec` use the system's sound server with no extra libraries:
+PulseAudio or PipeWire on Linux (falling back to ALSA, then OSS), CoreAudio on
+macOS, and the Windows audio API on Windows.
+
+## Man pages
+
+The SoX manual is embedded in the binary — read it with `unpin man sox`, or name
+a page: `unpin man sox soxi`, `unpin man sox soxformat`.
 
 ## Build locally
 
@@ -59,21 +64,13 @@ The [Releases](https://github.com/unpins/sox/releases) page has standalone binar
 
 ## Build notes
 
-- `sox` is the one real binary; `play`, `rec` and `soxi` are the argv[0]
-  symlinks upstream's install hook creates, dispatched on `basename(argv[0])`
-  inside `sox.c`. No multicall surgery — `lib.withAliases` just harvests the
-  three symlinks into an UNPIN_META block so unpin recreates them at install.
-- Live audio is fully static and routed through **libao**, not SoX's own device
-  backends. SoX's static ALSA backend dies on a modern PulseAudio/PipeWire
-  desktop (libasound dlopen's its routing module, impossible under static musl),
-  and its pulse backend can't satisfy the static libpulse dep chain. libao's
-  backends are instead compiled directly into the binary as built-in drivers
-  (pulse + alsa + oss on Linux, CoreAudio on macOS); playback talks straight to
-  the PulseAudio/PipeWire socket — no dlopen, no daemon library on disk.
-- MP3 **encode** (lame) is enabled; decode (libmad) is already on. The rest of
-  the codec set — libsndfile, libvorbis, opusfile, flac, wavpack and libpng (for
-  spectrograms) — links static from `pkgsStatic`.
-- **Windows** is built with mingw and carries no companion DLLs. Playback uses
-  SoX's native WMM (waveaudio) backend; libao/alsa/pulse are Linux-only and left
-  out.
-- The SoX man pages are embedded in the binary.
+- On Linux, ALSA's standard configuration is built into the binary, so ALSA
+  works without the system's `/usr/share/alsa`. Your own settings in
+  `/etc/asound.conf`, `/etc/alsa/conf.d` and `~/.asoundrc` still apply.
+- The `ladspa` effect and the `--magic` option are not included: LADSPA plugins
+  are shared libraries, which a single self-contained binary can't load, and
+  `--magic` needs a libmagic database.
+- The AMR-NB and AMR-WB formats are not included; their codecs are not free
+  software.
+- MP3 encoding (LAME) is included.
+- Windows is built with mingw.

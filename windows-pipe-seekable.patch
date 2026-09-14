@@ -1,0 +1,22 @@
+SoX decides whether its input can seek with fseek(fp, 0, SEEK_CUR). On
+Windows that call succeeds on a pipe too, so a piped input was treated as a
+file and every later ftello/fseeko misplaced the stream: `type a.wav | sox -t
+wav - b.flac` failed with "invalid chunk ID found". Require a regular file.
+
+--- a/src/formats.c
++++ b/src/formats.c
+@@ -347,6 +347,14 @@
+   if (!ft->fp)
+     return sox_false;
+ 
++#ifdef _WIN32
++  {
++    struct stat st;
++    if (fstat(fileno((FILE*)ft->fp), &st) != 0 || (st.st_mode & S_IFMT) != S_IFREG)
++      return sox_false;
++  }
++#endif
++
+   return !fseek(ft->fp, 0, SEEK_CUR);
+ }
+ 

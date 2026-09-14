@@ -1,0 +1,163 @@
+diff --git a/src/formats.c b/src/formats.c
+index a08a74c..fccdb9e 100644
+--- a/src/formats.c
++++ b/src/formats.c
+@@ -49,6 +49,12 @@ static char const * auto_detect_format(sox_format_t * ft, char const * ext)
+ {
+   char data[AUTO_DETECT_SIZE];
+   size_t len = lsx_readbuf(ft, data, ft->seekable? sizeof(data) : PIPE_AUTO_DETECT_SIZE);
++  if (!ft->seekable && len) {
++    /* A pipe can't be rewound: keep these bytes for the handler's first reads */
++    ft->pending_buffer = ft->pending_bytes = lsx_malloc(len);
++    memcpy(ft->pending_buffer, data, len);
++    ft->pending_count = len;
++  }
+   #define CHECK(type, p2, l2, d2, p1, l1, d1) if (len >= p1 + l1 && \
+       !memcmp(data + p1, d1, (size_t)l1) && !memcmp(data + p2, d2, (size_t)l2)) return #type;
+   CHECK(voc   , 0, 0, ""     , 0, 20, "Creative Voice File\x1a")
+@@ -457,31 +463,6 @@ static FILE * xfopen(char const * identifier, char const * mode, lsx_io_type * i
+   return fopen(identifier, mode);
+ }
+ 
+-/* Hack to rewind pipes (a small amount).
+- * Works by resetting the FILE buffer pointer */
+-static void UNUSED rewind_pipe(FILE * fp)
+-{
+-/* _FSTDIO is for Torek stdio (i.e. most BSD-derived libc's)
+- * In theory, we no longer need to check _NEWLIB_VERSION or __APPLE__ */
+-#if defined _FSTDIO || defined _NEWLIB_VERSION || defined __APPLE__
+-  fp->_p -= PIPE_AUTO_DETECT_SIZE;
+-  fp->_r += PIPE_AUTO_DETECT_SIZE;
+-#elif defined __GLIBC__
+-  fp->_IO_read_ptr = fp->_IO_read_base;
+-#elif defined _MSC_VER && _MSC_VER >= 1900
+-  #define NO_REWIND_PIPE
+-#elif defined _MSC_VER || defined _WIN32 || defined _WIN64 || \
+-      defined _ISO_STDIO_ISO_H || defined __sgi
+-  fp->_ptr = fp->_base;
+-#else
+-  /* To fix this #error, either simply remove the #error line and live without
+-   * file-type detection with pipes, or add support for your compiler in the
+-   * lines above.  Test with cat monkey.wav | ./sox --info - */
+-  #define NO_REWIND_PIPE
+-  (void)fp;
+-#endif
+-}
+-
+ static sox_format_t * open_read(
+     char               const * path,
+     void                     * buffer UNUSED,
+@@ -539,14 +520,11 @@ static sox_format_t * open_read(
+       filetype = auto_detect_format(ft, lsx_find_file_extension(path));
+       lsx_rewind(ft);
+     }
+-#ifndef NO_REWIND_PIPE
+     else if (!(ft->handler.flags & SOX_FILE_NOSTDIO) &&
+         input_bufsiz >= PIPE_AUTO_DETECT_SIZE) {
+       filetype = auto_detect_format(ft, lsx_find_file_extension(path));
+-      rewind_pipe(ft->fp);
+       ft->tell_off = 0;
+     }
+-#endif
+ 
+     if (filetype) {
+       lsx_report("detected file format type `%s'", filetype);
+@@ -624,6 +602,7 @@ error:
+   if (ft->fp && ft->fp != stdin)
+     xfclose(ft->fp, ft->io_type);
+   free(ft->priv);
++  free(ft->pending_buffer);
+   free(ft->filename);
+   free(ft->filetype);
+   free(ft);
+@@ -985,6 +964,7 @@ error:
+   if (ft->fp && ft->fp != stdout)
+     xfclose(ft->fp, ft->io_type);
+   free(ft->priv);
++  free(ft->pending_buffer);
+   free(ft->filename);
+   free(ft->filetype);
+   free(ft);
+@@ -1070,6 +1050,7 @@ int sox_close(sox_format_t * ft)
+   }
+ 
+   free(ft->priv);
++  free(ft->pending_buffer);
+   free(ft->filename);
+   free(ft->filetype);
+   sox_delete_comments(&ft->oob.comments);
+diff --git a/src/formats_i.c b/src/formats_i.c
+index 7048040..c9d7304 100644
+--- a/src/formats_i.c
++++ b/src/formats_i.c
+@@ -95,9 +95,18 @@ int lsx_check_read_params(sox_format_t * ft, unsigned channels,
+  */
+ size_t lsx_readbuf(sox_format_t * ft, void *buf, size_t len)
+ {
+-  size_t ret = fread(buf, (size_t) 1, len, (FILE*)ft->fp);
+-  if (ret != len && ferror((FILE*)ft->fp))
+-    lsx_fail_errno(ft, errno, "lsx_readbuf");
++  size_t ret = 0;
++  if (ft->pending_count) {
++    ret = min(len, ft->pending_count);
++    memcpy(buf, ft->pending_bytes, ret);
++    ft->pending_bytes += ret;
++    ft->pending_count -= ret;
++  }
++  if (ret < len) {
++    ret += fread((char *)buf + ret, (size_t) 1, len - ret, (FILE*)ft->fp);
++    if (ret != len && ferror((FILE*)ft->fp))
++      lsx_fail_errno(ft, errno, "lsx_readbuf");
++  }
+   ft->tell_off += ret;
+   return ret;
+ }
+@@ -158,7 +167,7 @@ off_t lsx_tell(sox_format_t * ft)
+ 
+ int lsx_eof(sox_format_t * ft)
+ {
+-  return feof((FILE*)ft->fp);
++  return ft->pending_count ? 0 : feof((FILE*)ft->fp);
+ }
+ 
+ int lsx_error(sox_format_t * ft)
+@@ -180,6 +189,12 @@ void lsx_clearerr(sox_format_t * ft)
+ 
+ int lsx_unreadb(sox_format_t * ft, unsigned b)
+ {
++  /* While pending bytes remain, the last byte read came from them */
++  if (ft->pending_count) {
++    *--ft->pending_bytes = (char)b;
++    ft->pending_count++;
++    return (int)b;
++  }
+   return ungetc((int)b, ft->fp);
+ }
+ 
+@@ -194,6 +209,12 @@ int lsx_seeki(sox_format_t * ft, off_t offset, int whence)
+     if (ft->seekable == 0) {
+         /* If a stream peel off chars else EPERM */
+         if (whence == SEEK_CUR) {
++            while (offset > 0 && ft->pending_count) {
++                ft->pending_bytes++;
++                ft->pending_count--;
++                offset--;
++                ++ft->tell_off;
++            }
+             while (offset > 0 && !feof((FILE*)ft->fp)) {
+                 getc((FILE*)ft->fp);
+                 offset--;
+diff --git a/src/sox.h b/src/sox.h
+index bac5035..8a97172 100644
+--- a/src/sox.h
++++ b/src/sox.h
+@@ -1536,6 +1536,9 @@ struct sox_format_t {
+   sox_uint64_t     data_start;      /**< Offset at which headers end and sound data begins (set by lsx_check_read_params) */
+   sox_format_handler_t handler;     /**< Format handler for this file */
+   void             * priv;          /**< Format handler's private data area */
++  char             * pending_buffer; /**< Bytes read from a pipe to detect its type, */
++  char             * pending_bytes;  /**< handed out again by the next reads */
++  size_t             pending_count;
+ };
+ 
+ /**

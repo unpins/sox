@@ -18,8 +18,9 @@
   # (alsa.c / pulseaudio.c) can't carry it: the static ALSA backend dies on a modern
   # PulseAudio/PipeWire desktop because libasound dlopen's its routing module
   # (libasound_module_pcm_pipewire.so) — impossible under static musl — so the
-  # `default` pcm has no device; and SoX's pulseaudio backend uses AC_CHECK_LIB with
-  # a bare `-lpulse` link test that can't satisfy the static libpulse dep chain.
+  # `default` pcm has no device. SoX's pulseaudio backend is linked too (its bare
+  # `-lpulse` link test gets the static chain through LIBPULSEAUDIO_LIBS) and is
+  # what `rec` uses; playback goes through libao below.
   #
   # So we route SoX's playback through libao instead, reusing the exact built-in
   # static-driver libao proven for unpins/vorbis-tools (./audio.nix: pulse + alsa +
@@ -83,14 +84,14 @@
       engine = "unpin-llvm";
 
       # sox bakes a handful of plugin/data-dir path strings into the binary —
-      # libmagic's magic DB, pulseaudio's server/locale dirs, libao's and
-      # alsa-lib's dynamic-plugin dirs, and sox's own libsox plugin/LADSPA dirs.
-      # All are inert here: the binary is fully static (no dlopen — audio.nix
-      # compiles libao's drivers in, format handlers are built-in), and those
-      # /nix/store paths don't exist on a user's machine anyway. Scrub them so the
-      # shipped binary is 0-ref and portable.
+      # pulseaudio's server/locale dirs, libao's and alsa-lib's dynamic-plugin
+      # dirs, and sox's own libsox plugin dir. All are inert here: the binary is
+      # fully static (no dlopen — audio.nix compiles libao's drivers in, format
+      # handlers are built-in), and those /nix/store paths don't exist on a
+      # user's machine anyway. Scrub them so the shipped binary is 0-ref and
+      # portable. (ALSA's configuration dir is NOT among them: audio.nix compiles
+      # that configuration into the binary.)
       removeReferences = [
-        "file-static"
         "libpulseaudio"
         "libao"
         "alsa-lib"
@@ -201,12 +202,70 @@
             enableLibao = true;
             libao = audioLibao;
             # Native alsa backend shares libao's pipewire-static libasound.a (one
-            # copy, no vanilla alsa-lib whose `default` dlopen-fails). Sox's own
-            # pulse backend is off: playback routes through libao → alsa.
+            # copy, no vanilla alsa-lib whose `default` dlopen-fails).
             alsa-lib = audioLibao.alsaStatic;
-            enableLibpulseaudio = false;
+            # SoX's own pulse backend, on the same static libpulse client libao
+            # uses. It is what `rec` reaches first (set_default_device tries
+            # pulseaudio before alsa), so recording works on any PulseAudio/
+            # PipeWire desktop without depending on the host's ALSA config files.
+            enableLibpulseaudio = !pkgs.stdenv.hostPlatform.isDarwin;
+            libpulseaudio = audioLibao.libpulse or null;
             enableLame = true;
           }).overrideAttrs (o: {
+            # SoX 14.4.2 detects a piped file's type by rewinding stdio's buffer
+            # through libc-private FILE fields, which only glibc/BSD layouts have:
+            # on musl the rewind is compiled out and on mingw it corrupts the
+            # stream, so `cat x.wav | sox - y.flac` failed on Linux and Windows.
+            # Keep the detection bytes and hand them to the handler instead (the
+            # sox_ng fix).
+            patches = (o.patches or [ ]) ++ [ ./pipe-detect.patch ];
+            # Two options that can never work in this binary, left out so SoX
+            # says so instead of failing obscurely: LADSPA plugins are shared
+            # libraries, which a static binary can't load, and `--magic` reads
+            # libmagic's database from a store path no user machine has. macOS
+            # and Windows builds already lack both.
+            configureFlags = (o.configureFlags or [ ]) ++ [ "--without-magic" "--without-ladspa" ];
+            # A `--version` smoke passes a binary with no working format, so
+            # exercise the libraries: lossless round trips through the native
+            # and libsndfile handlers, lossy encode/decode, piped input without
+            # `-t` (type detection), and a spectrogram. On Linux also check that
+            # ALSA opens a PCM from its built-in configuration and that `rec` has
+            # its pulse backend.
+            doInstallCheck = pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform;
+            installCheckPhase = ''
+              runHook preInstallCheck
+              s=$out/bin/sox
+              fail() { echo "installCheck: $*"; exit 1; }
+              "$s" -D -n -r 44100 -c 2 -b 16 src.wav synth 1 sine 440 sine 660 gain -3
+              "$s" -D src.wav -t s16 ref.raw
+              for f in flac wv aiff au caf w64; do
+                "$s" -D src.wav "t.$f" || fail "cannot write $f"
+                "$s" -D "t.$f" -t s16 back.raw || fail "cannot read $f"
+                cmp -s ref.raw back.raw || fail "$f round trip changed the audio"
+              done
+              cp src.wav t.wav
+              for f in wav flac; do
+                cat "t.$f" | "$s" -D - -t s16 piped.raw || fail "piped $f: type not detected"
+                cmp -s ref.raw piped.raw || fail "piped $f read back different audio"
+              done
+              for f in ogg mp3; do
+                "$s" src.wav "t.$f" || fail "cannot encode $f"
+                d=$("$out/bin/soxi" -D "t.$f") || fail "cannot decode $f"
+                case "$d" in 0.9*|1.0*) ;; *) fail "$f decodes to $d s, not 1 s" ;; esac
+              done
+              "$s" src.wav -n spectrogram -o spec.png
+              head -c 4 spec.png | grep -q PNG || fail "spectrogram wrote no PNG"
+            '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              # The sandbox has alsa-lib's share/alsa in the store, so opening a PCM
+              # alone can't tell the built-in configuration from a store path that
+              # only the build machine has; the grep closes that gap.
+              if grep -aq share/alsa "$s"; then fail "ALSA reads its configuration from disk"; fi
+              "$s" -q -n -t alsa null synth 0.1 sine 440 || fail "ALSA cannot open the null PCM from its built-in configuration"
+              "$s" --help | grep -q "DRIVERS:.* pulseaudio" || fail "no pulseaudio backend for rec"
+            '' + ''
+              echo "installCheck: round trips, piped detection and spectrogram OK"
+              runHook postInstallCheck
+            '';
             meta = (o.meta or { }) // { platforms = pkgs.lib.platforms.all; broken = false; };
             # libao's static link chain (libao + pulse-simple/alsa or CoreAudio
             # frameworks) for SoX's AC_CHECK_LIB(ao) test and final link.
@@ -226,6 +285,12 @@
               export LIBSNDFILE_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs sndfile)"
               echo "unpins: LIBSNDFILE_LIBS=$LIBSNDFILE_LIBS"
               [ -n "$LIBSNDFILE_LIBS" ] || { echo "unpins: pkg-config could not resolve sndfile.pc"; exit 1; }
+            '' + pkgs.lib.optionalString (!pkgs.stdenv.hostPlatform.isDarwin) ''
+              # And for the pulse backend: its link test is `-lpulse -lpulse-simple`
+              # plus $LIBPULSEAUDIO_LIBS, which must carry libpulse's static chain.
+              export LIBPULSEAUDIO_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs libpulse-simple)"
+              echo "unpins: LIBPULSEAUDIO_LIBS=$LIBPULSEAUDIO_LIBS"
+              [ -n "$LIBPULSEAUDIO_LIBS" ] || { echo "unpins: pkg-config could not resolve libpulse-simple.pc"; exit 1; }
             '';
             # Make libao the default PLAYBACK device (file_count>0 ⇒ not `rec`,
             # which libao can't do — recording falls through to the native
@@ -278,7 +343,22 @@
             };
             extraOverrides = old: {
               meta = (old.meta or { }) // { platforms = pkgs.lib.platforms.all; broken = false; };
-              buildInputs = builtins.map metaAllow (old.buildInputs or [ ]);
+              # sndfile.pc lists libmpg123 in Requires.private, but libsndfile
+              # keeps it as a plain buildInput, so its .pc is not on SoX's
+              # PKG_CONFIG_PATH and `pkg-config --static --libs sndfile` fails.
+              buildInputs = builtins.map metaAllow (old.buildInputs or [ ])
+                ++ [ (ulib.mingwStaticCross pkgs).libmpg123 ];
+              # Piped type detection, same as the native build; and pipes must not
+              # count as seekable (msvcrt's fseek succeeds on them).
+              patches = (old.patches or [ ]) ++ [ ./pipe-detect.patch ./windows-pipe-seekable.patch ];
+              # Same bare `-lsndfile` link test as the native build: without the
+              # static chain it fails, and the sndfile formats (caf, w64, paf, …)
+              # went missing from the .exe only.
+              preConfigure = (old.preConfigure or "") + ''
+                export LIBSNDFILE_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs sndfile)"
+                echo "unpins: LIBSNDFILE_LIBS=$LIBSNDFILE_LIBS"
+                [ -n "$LIBSNDFILE_LIBS" ] || { echo "unpins: pkg-config could not resolve sndfile.pc"; exit 1; }
+              '';
             };
           };
         in
