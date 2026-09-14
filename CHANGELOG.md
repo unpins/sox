@@ -16,15 +16,17 @@
   `cat song.flac | sox - out.wav`, failed on Linux and Windows. The format is
   now detected, as it already was on macOS.
 
-- On Windows, reading WAV and other formats from a pipe failed even with the
-  format given, as in `type song.wav | sox -t wav - out.flac`
-  (`invalid chunk ID found`).
+- On Windows, pipes were treated like files. Reading WAV and other formats
+  from a pipe failed even with the format given, as in
+  `type song.wav | sox -t wav - out.flac` (`invalid chunk ID found`), and
+  writing to one, as in `sox song.wav -t wav - | …`, added a second copy of
+  the file header to the end of the audio.
 
 ### Added
 
-- The formats SoX reads and writes through libsndfile — `caf`, `w64`, `paf`,
-  `pvf`, `mat4`, `mat5` and `fap` — on Linux and Windows. The released
-  binaries have none of them.
+- On Windows, the formats SoX reads and writes through libsndfile — `caf`,
+  `w64`, `paf`, `pvf`, `mat4`, `mat5` and `fap`. The released Windows binary
+  has none of them; Linux and macOS already had them.
 
 - On Linux, `rec` records from PulseAudio or PipeWire directly.
 

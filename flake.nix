@@ -35,10 +35,12 @@
   #     `AC_CHECK_LIB(ao, ao_play, …, other-libs=$LIBAO_LIBS)` link test (and the
   #     final link) see libao's full static chain (libpulse-simple/alsa). A bare
   #     `-lao` test would fail-link → libao silently dropped.
-  #   - a one-liner moves try_device("ao") to the front of set_default_device(), so
-  #     `sox -d` / play / rec pick libao (and its probing) instead of SoX's broken
-  #     native alsa default. (Inert on Windows, where libao isn't compiled and the
-  #     native waveaudio backend handles playback.)
+  #   - a substitution in sox.c makes libao the default PLAYBACK device (`play`,
+  #     `sox -d` as output) when AUDIODRIVER is unset, instead of SoX's broken
+  #     native alsa default. Recording can't use libao, so `rec` still walks
+  #     set_default_device(), which reaches SoX's pulseaudio backend first on Linux
+  #     and coreaudio on macOS. (Inert on Windows, where libao isn't compiled and
+  #     the native waveaudio backend handles playback and recording.)
   #
   # enableLame = true turns on MP3 *encode* (off by default in nixpkgs); MP3 decode
   # (libmad) is already on. The rest of the codec set — libsndfile, libvorbis,
@@ -72,6 +74,16 @@
           lto = false;
           captureLinks = true;
         };
+
+      # SoX detects libsndfile with AC_CHECK_LIB(sndfile, …, other-libs =
+      # $LIBSNDFILE_LIBS). A bare `-lsndfile` link test can't resolve the static
+      # libsndfile.a's codec symbols, so the handler (caf/w64/paf/…) is silently
+      # dropped. Native and Windows builds both feed it the static chain.
+      sndfileLibs = ''
+        export LIBSNDFILE_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs sndfile)"
+        echo "unpins: LIBSNDFILE_LIBS=$LIBSNDFILE_LIBS"
+        [ -n "$LIBSNDFILE_LIBS" ] || { echo "unpins: pkg-config could not resolve sndfile.pc"; exit 1; }
+      '';
     in
     ulib.mkStandaloneFlake {
       inherit self;
@@ -282,10 +294,7 @@
               # libsndfile is a buildInput. Feed the full static chain from
               # pkg-config so the test — and the final link — resolve. Without this
               # the shipped libsndfile.a is dead weight.
-              export LIBSNDFILE_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs sndfile)"
-              echo "unpins: LIBSNDFILE_LIBS=$LIBSNDFILE_LIBS"
-              [ -n "$LIBSNDFILE_LIBS" ] || { echo "unpins: pkg-config could not resolve sndfile.pc"; exit 1; }
-            '' + pkgs.lib.optionalString (!pkgs.stdenv.hostPlatform.isDarwin) ''
+            '' + sndfileLibs + pkgs.lib.optionalString (!pkgs.stdenv.hostPlatform.isDarwin) ''
               # And for the pulse backend: its link test is `-lpulse -lpulse-simple`
               # plus $LIBPULSEAUDIO_LIBS, which must carry libpulse's static chain.
               export LIBPULSEAUDIO_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs libpulse-simple)"
@@ -354,11 +363,7 @@
               # Same bare `-lsndfile` link test as the native build: without the
               # static chain it fails, and the sndfile formats (caf, w64, paf, …)
               # went missing from the .exe only.
-              preConfigure = (old.preConfigure or "") + ''
-                export LIBSNDFILE_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs sndfile)"
-                echo "unpins: LIBSNDFILE_LIBS=$LIBSNDFILE_LIBS"
-                [ -n "$LIBSNDFILE_LIBS" ] || { echo "unpins: pkg-config could not resolve sndfile.pc"; exit 1; }
-              '';
+              preConfigure = (old.preConfigure or "") + sndfileLibs;
             };
           };
         in
