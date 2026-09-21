@@ -121,19 +121,6 @@
           # list). Same nativeFixes.libopus opus-tools uses.
           ps = pkgs.pkgsStatic.extend (final: prev: {
             libopus = ulib.nativeFixes.libopus prev;
-            # libX11 (pulled on Linux via libao's playback chain
-            # libpulseaudio → dbus → libX11) has a configure probe that checks
-            # whether its cpp needs -undef to stop predefining `unix`. The
-            # engine's clang cpp keeps `unix` defined even under -undef, so the
-            # probe aborts ("defines unix with or without -undef. I don't know
-            # what to do."). RAWCPP only preprocesses X11's host-independent
-            # locale/compose text at build time, so hand it the build-host gcc
-            # cpp (which honors -undef); libX11 links in as a plain static .a
-            # regardless of which cpp cooked its data. Inert on darwin/windows
-            # (no X11 in the CoreAudio/WMM playback paths). Same fix ddcutil uses.
-            libx11 = prev.libx11.overrideAttrs (_: {
-              RAWCPP = "${final.buildPackages.stdenv.cc}/bin/cpp";
-            });
             # libmpg123 (pulled by libsndfile for MP3 decode) builds its mpg123/
             # out123 CLI programs even under nixpkgs' libOnly (that only drops the
             # audio backends). Those programs fail the engine's whole-program LTO
