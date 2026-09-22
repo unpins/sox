@@ -11,8 +11,9 @@
   # SoX installs ONE real binary, `sox`, plus three argv[0] symlinks the upstream
   # install-exec-hook creates — `play`, `rec`, `soxi` — all dispatched on
   # basename(argv[0]) inside sox.c. So there's no multicall surgery: the canonical
-  # binary is already named after the package, and the shipping embed harvests the
-  # three symlinks itself so unpin recreates them at install.
+  # binary is already named after the package. The three names are declared on
+  # the multicall program below, which is what the embed announces so unpin
+  # recreates them at install.
   #
   # Live audio in a fully-static binary is the hard part. SoX's OWN device backends
   # (alsa.c / pulseaudio.c) can't carry it: the static ALSA backend dies on a modern
@@ -176,7 +177,7 @@
       multicall = {
         # The `.exe` on the engine too, not the nixpkgs mingw-gcc cross.
         windows = true;
-        programs = [{ name = "sox"; }];
+        programs = [{ name = "sox"; aliases = [ "play" "rec" "soxi" ]; }];
       };
 
       # sox bakes a handful of plugin/data-dir path strings into the binary —
