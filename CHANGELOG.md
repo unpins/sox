@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The Windows binary is now built by the same compiler as the Linux and macOS
+  ones. It is about 14% smaller (4.65 MB to 4.00 MB); `--version` and
+  conversions to FLAC, MP3, Ogg Vorbis and CAF, including from a pipe, were
+  checked under Wine.
+
+  It now uses the Universal C Runtime, which is part of Windows 10 and later.
+  On Windows 7 or 8.1 that runtime has to be installed first — it comes through
+  Windows Update. The previous binary did not need it.
+
 ### Fixed
 
 - On Linux, `rec` did not work, and neither did `play` whenever it used ALSA

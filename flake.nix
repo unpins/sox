@@ -75,6 +75,14 @@
           captureLinks = true;
         };
 
+      # LTO is off (see engStdenv), but the multicall module hook takes the
+      # program's entry point from the LTO module, and with every object native
+      # it finds none. So sox.c alone compiles to bitcode: the module gets its
+      # `main`, and libsox.c, where the miscompile lives, stays native.
+      mainBitcode = ''
+        echo 'sox.$(OBJEXT): CFLAGS += -flto' >> src/Makefile
+      '';
+
       # SoX detects libsndfile with AC_CHECK_LIB(sndfile, …, other-libs =
       # $LIBSNDFILE_LIBS). A bare `-lsndfile` link test can't resolve the static
       # libsndfile.a's codec symbols, so the handler (caf/w64/paf/…) is silently
@@ -84,6 +92,77 @@
         echo "unpins: LIBSNDFILE_LIBS=$LIBSNDFILE_LIBS"
         [ -n "$LIBSNDFILE_LIBS" ] || { echo "unpins: pkg-config could not resolve sndfile.pc"; exit 1; }
       '';
+      # The codec leaves both package sets link — the native pkgsStatic and the
+      # mingw cross — and so both build them under the engine clang.
+      codecFixes = final: prev: {
+        # libopus needs the arm64 meson-intrinsics fix on native aarch64-darwin
+        # (nixpkgs writes meson cpu_family = "arm64"; opus' meson.build only
+        # matches arm/aarch64 → "no intrinsics support for arm64"). SoX pulls
+        # libopus transitively via opusfile AND libsndfile, so patch it once in
+        # the package set. Inert on every other platform (just widens a match
+        # list). Same nativeFixes.libopus opus-tools uses.
+        libopus = ulib.nativeFixes.libopus prev;
+        # lame's `#ifdef HAVE_XMMINTRIN_H` SSE paths (libmp3lame/{vector/
+        # xmm_quantize_sub,fft,quantize,lame}.c use `__m128`) don't compile on
+        # the i686 target's -march=i686 baseline (no SSE). configure defines
+        # HAVE_XMMINTRIN_H anyway: its probe compiles `_mm_sfence()` with
+        # clang's *default* i686 flags (SSE2-capable) BEFORE lame appends
+        # -march=i686 to CFLAGS, so it passes where the real -march=i686
+        # compile fails (gcc doesn't false-positive here). The i686 target
+        # deliberately assumes no SSE, so undefine the macro post-configure —
+        # every SSE block then compiles as its scalar fallback (the code ARM/
+        # PPC already use; MP3 encode unchanged). Gated to i686; x86_64 (SSE2
+        # baseline) keeps the vectorized paths and its hash.
+        lame = if final.stdenv.hostPlatform.isx86_32
+          then prev.lame.overrideAttrs (o: {
+            postConfigure = (o.postConfigure or "") + ''
+              sed -i '/#define HAVE_XMMINTRIN_H 1/d' config.h
+            '';
+          })
+          else prev.lame;
+        # libvorbis' 32-bit-x86 CFLAGS case hardcodes `-mno-ieee-fp`, a
+        # GCC-only flag the engine clang rejects as a fatal unknown argument
+        # (x86_64 takes a different case, so it's unaffected). The flag only
+        # relaxes IEEE FP strictness for -ffast-math (already on); drop it so
+        # the i686 build compiles. Gated to i686 to keep other hashes.
+        libvorbis = if final.stdenv.hostPlatform.isx86_32
+          then prev.libvorbis.overrideAttrs (o: {
+            postPatch = (o.postPatch or "") + ''
+              substituteInPlace configure --replace-fail ' -mno-ieee-fp' ""
+            '';
+          })
+          else prev.libvorbis;
+        # libmad's configure.ac appends a fistful of GCC-tuning flags
+        # (-fcse-follow-jumps/-fregmove/…) in its `$GCC = yes` branch — which
+        # the engine clang also takes (it sets __GNUC__), but clang rejects
+        # those flags as fatal "unknown argument". nixpkgs already strips
+        # -fforce-mem and re-runs autoconf; strip the remaining clang-hostile
+        # ones the same way (they're gcc micro-tuning; clang's -O2 covers it,
+        # decode output unchanged).
+        libmad = prev.libmad.overrideAttrs (o: {
+          postPatch = (o.postPatch or "") + ''
+            sed -i -E 's/-f(force-addr|thread-jumps|cse-follow-jumps|cse-skip-blocks|expensive-optimizations|regmove|schedule-insns2)//g' configure.ac
+          '';
+        });
+        # libmpg123 (pulled by libsndfile for MP3 decode) builds its mpg123/
+        # out123 CLI programs even under nixpkgs' libOnly (that only drops the
+        # audio backends). Those programs fail the engine's whole-program LTO
+        # link (ld.lld: undefined symbol `fputs`), and we don't ship them —
+        # libsndfile needs only libmpg123.a. Select just that component
+        # (--disable-components --enable-libmpg123): no programs, no
+        # libout123/libsyn123, so the offending link never happens and the
+        # decode library is unchanged.
+        libmpg123 = prev.libmpg123.overrideAttrs (o: {
+          configureFlags = (o.configureFlags or [ ])
+            ++ [ "--disable-components" "--enable-libmpg123" ];
+          # With only the library built there are no man pages, so the
+          # recipe's declared `man` output would be empty and nix errors
+          # ("failed to produce output path"). Materialize it.
+          postInstall = (o.postInstall or "") + ''
+            mkdir -p "$man"
+          '';
+        });
+      };
     in
     ulib.mkStandaloneFlake {
       inherit self;
@@ -94,6 +173,11 @@
       # silently pass a broken binary.
       smokePattern = "SoX v14\\.4";
       engine = "unpin-llvm";
+      multicall = {
+        # The `.exe` on the engine too, not the nixpkgs mingw-gcc cross.
+        windows = true;
+        programs = [{ name = "sox"; }];
+      };
 
       # sox bakes a handful of plugin/data-dir path strings into the binary —
       # pulseaudio's server/locale dirs, libao's and alsa-lib's dynamic-plugin
@@ -113,22 +197,7 @@
       # Native (Linux + Darwin). Playback via the ./audio.nix built-in-driver libao.
       build = pkgs:
         let
-          # libopus needs the arm64 meson-intrinsics fix on native aarch64-darwin
-          # (nixpkgs writes meson cpu_family = "arm64"; opus' meson.build only
-          # matches arm/aarch64 → "no intrinsics support for arm64"). SoX pulls
-          # libopus transitively via opusfile AND libsndfile, so patch it once in
-          # the package set. Inert on every other platform (just widens a match
-          # list). Same nativeFixes.libopus opus-tools uses.
-          ps = pkgs.pkgsStatic.extend (final: prev: {
-            libopus = ulib.nativeFixes.libopus prev;
-            # libmpg123 (pulled by libsndfile for MP3 decode) builds its mpg123/
-            # out123 CLI programs even under nixpkgs' libOnly (that only drops the
-            # audio backends). Those programs fail the engine's whole-program LTO
-            # link (ld.lld: undefined symbol `fputs`), and we don't ship them —
-            # libsndfile needs only libmpg123.a. Select just that component
-            # (--disable-components --enable-libmpg123): no programs, no
-            # libout123/libsyn123, so the offending link never happens and the
-            # decode library is unchanged.
+          ps = pkgs.pkgsStatic.extend (final: prev: codecFixes final prev // {
             # fftw (single, pulled via libpulseaudio's equalizer module) forces
             # --enable-openmp and links llvmPackages.openmp, but the engine's
             # self-contained clang has no OpenMP runtime → configure aborts
@@ -140,58 +209,6 @@
                 (o.configureFlags or [ ]);
               buildInputs = final.lib.filter (d: (d.pname or "") != "openmp")
                 (o.buildInputs or [ ]);
-            });
-            # lame's `#ifdef HAVE_XMMINTRIN_H` SSE paths (libmp3lame/{vector/
-            # xmm_quantize_sub,fft,quantize,lame}.c use `__m128`) don't compile on
-            # the i686 target's -march=i686 baseline (no SSE). configure defines
-            # HAVE_XMMINTRIN_H anyway: its probe compiles `_mm_sfence()` with
-            # clang's *default* i686 flags (SSE2-capable) BEFORE lame appends
-            # -march=i686 to CFLAGS, so it passes where the real -march=i686
-            # compile fails (gcc doesn't false-positive here). The i686 target
-            # deliberately assumes no SSE, so undefine the macro post-configure —
-            # every SSE block then compiles as its scalar fallback (the code ARM/
-            # PPC already use; MP3 encode unchanged). Gated to i686; x86_64 (SSE2
-            # baseline) keeps the vectorized paths and its hash.
-            lame = if final.stdenv.hostPlatform.isx86_32
-              then prev.lame.overrideAttrs (o: {
-                postConfigure = (o.postConfigure or "") + ''
-                  sed -i '/#define HAVE_XMMINTRIN_H 1/d' config.h
-                '';
-              })
-              else prev.lame;
-            # libvorbis' 32-bit-x86 CFLAGS case hardcodes `-mno-ieee-fp`, a
-            # GCC-only flag the engine clang rejects as a fatal unknown argument
-            # (x86_64 takes a different case, so it's unaffected). The flag only
-            # relaxes IEEE FP strictness for -ffast-math (already on); drop it so
-            # the i686 build compiles. Gated to i686 to keep other hashes.
-            libvorbis = if final.stdenv.hostPlatform.isx86_32
-              then prev.libvorbis.overrideAttrs (o: {
-                postPatch = (o.postPatch or "") + ''
-                  substituteInPlace configure --replace-fail ' -mno-ieee-fp' ""
-                '';
-              })
-              else prev.libvorbis;
-            # libmad's configure.ac appends a fistful of GCC-tuning flags
-            # (-fcse-follow-jumps/-fregmove/…) in its `$GCC = yes` branch — which
-            # the engine clang also takes (it sets __GNUC__), but clang rejects
-            # those flags as fatal "unknown argument". nixpkgs already strips
-            # -fforce-mem and re-runs autoconf; strip the remaining clang-hostile
-            # ones the same way (they're gcc micro-tuning; clang's -O2 covers it,
-            # decode output unchanged).
-            libmad = prev.libmad.overrideAttrs (o: {
-              postPatch = (o.postPatch or "") + ''
-                sed -i -E 's/-f(force-addr|thread-jumps|cse-follow-jumps|cse-skip-blocks|expensive-optimizations|regmove|schedule-insns2)//g' configure.ac
-              '';
-            });
-            libmpg123 = prev.libmpg123.overrideAttrs (o: {
-              configureFlags = (o.configureFlags or [ ])
-                ++ [ "--disable-components" "--enable-libmpg123" ];
-              # With only the library built there are no man pages, so the
-              # recipe's declared `man` output would be empty and nix errors
-              # ("failed to produce output path"). Materialize it.
-              postInstall = (o.postInstall or "") + ''
-                mkdir -p "$man"
-              '';
             });
           });
           audioLibao = import ./audio.nix { lib = pkgs.lib // ulib; } ps;
@@ -303,16 +320,16 @@
                   'if (!f->filetype) f->filetype = getenv("AUDIODRIVER");
                 if (!f->filetype && file_count) f->filetype = "ao";'
             '';
-          } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
-            # pkgsStatic on darwin can't suppress libtool's shared build (no
-            # static libSystem), so libsox builds as a .dylib and the sox
-            # frontend links it dynamically → fails the portability check. Force
-            # libtool to emit only the static archive so libsox folds into the
-            # binary (libSystem + system frameworks stay the only dynamic deps).
-            # Same fix lame/xz use. Gated on darwin so Linux/cross keep their hash.
-            postConfigure = (o.postConfigure or "") + ''
-              sed -i 's/^build_libtool_libs=yes$/build_libtool_libs=no/' libtool
-            '';
+            postConfigure = (o.postConfigure or "") + mainBitcode
+              # pkgsStatic on darwin can't suppress libtool's shared build (no
+              # static libSystem), so libsox builds as a .dylib and the sox
+              # frontend links it dynamically → fails the portability check.
+              # Force libtool to emit only the static archive so libsox folds
+              # into the binary (libSystem + system frameworks stay the only
+              # dynamic deps). Same fix lame/xz use.
+              + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+                sed -i 's/^build_libtool_libs=yes$/build_libtool_libs=no/' libtool
+              '';
           });
         in
         sox;
@@ -326,33 +343,32 @@
           metaAllow = d: d.overrideAttrs (o: {
             meta = (o.meta or { }) // { platforms = pkgs.lib.platforms.all; broken = false; };
           });
-          # libtool swallows the stdenv's -static for the program link, so the
-          # gcc stack-protector runtime leaks in as a libssp-0.dll import.
-          # mingwStaticBinary adds libtool-aware LDFLAGS=-all-static at make-time
-          # so the final link resolves libssp.a (and every codec dep) statically
-          # → only system DLLs (KERNEL32/msvcrt/WINMM) remain.
-          sox = ulib.mingwStaticBinary {
-            pkg = (ulib.mingwStaticCross pkgs).sox;
-            staticDeps = {
-              enableLibao = false;
-              enableLame = true;
-            };
-            extraOverrides = old: {
-              meta = (old.meta or { }) // { platforms = pkgs.lib.platforms.all; broken = false; };
-              # sndfile.pc lists libmpg123 in Requires.private, but libsndfile
-              # keeps it as a plain buildInput, so its .pc is not on SoX's
-              # PKG_CONFIG_PATH and `pkg-config --static --libs sndfile` fails.
-              buildInputs = builtins.map metaAllow (old.buildInputs or [ ])
-                ++ [ (ulib.mingwStaticCross pkgs).libmpg123 ];
-              # Piped type detection, same as the native build; and pipes must not
-              # count as seekable (msvcrt's fseek succeeds on them).
-              patches = (old.patches or [ ]) ++ [ ./pipe-detect.patch ./windows-pipe-seekable.patch ];
-              # Same bare `-lsndfile` link test as the native build: without the
-              # static chain it fails, and the sndfile formats (caf, w64, paf, …)
-              # went missing from the .exe only.
-              preConfigure = (old.preConfigure or "") + sndfileLibs;
-            };
-          };
+          mc = (ulib.mingwStaticCross pkgs).extend codecFixes;
+          sox = (mc.sox.override {
+            enableLibao = false;
+            enableLame = true;
+            # The same LTO-off engine as the native build, spelled as nix-lib
+            # spells its static mingw stdenv: a bare NoLto stdenv here would
+            # drop makeStaticLibraries, and sox would build libsox as a DLL.
+            stdenv =
+              let b = mc.stdenvAdapters.makeStaticLibraries ulib.windowsEngineStdenvSharedNoLto;
+              in b // { hostPlatform = b.hostPlatform // { isStatic = true; }; };
+          }).overrideAttrs (old: {
+            meta = (old.meta or { }) // { platforms = pkgs.lib.platforms.all; broken = false; };
+            # sndfile.pc lists libmpg123 in Requires.private, but libsndfile
+            # keeps it as a plain buildInput, so its .pc is not on SoX's
+            # PKG_CONFIG_PATH and `pkg-config --static --libs sndfile` fails.
+            buildInputs = builtins.map metaAllow (old.buildInputs or [ ])
+              ++ [ mc.libmpg123 ];
+            # Piped type detection, same as the native build; and pipes must not
+            # count as seekable (msvcrt's fseek succeeds on them).
+            patches = (old.patches or [ ]) ++ [ ./pipe-detect.patch ./windows-pipe-seekable.patch ];
+            # Same bare `-lsndfile` link test as the native build: without the
+            # static chain it fails, and the sndfile formats (caf, w64, paf, …)
+            # went missing from the .exe only.
+            preConfigure = (old.preConfigure or "") + sndfileLibs;
+            postConfigure = (old.postConfigure or "") + mainBitcode;
+          });
         in
         sox;
     };
