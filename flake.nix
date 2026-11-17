@@ -127,24 +127,9 @@
             sed -i -E 's/-f(force-addr|thread-jumps|cse-follow-jumps|cse-skip-blocks|expensive-optimizations|regmove|schedule-insns2)//g' configure.ac
           '';
         });
-        # libmpg123 (pulled by libsndfile for MP3 decode) builds its mpg123/
-        # out123 CLI programs even under nixpkgs' libOnly (that only drops the
-        # audio backends). Those programs fail the engine's whole-program LTO
-        # link (ld.lld: undefined symbol `fputs`), and we don't ship them —
-        # libsndfile needs only libmpg123.a. Select just that component
-        # (--disable-components --enable-libmpg123): no programs, no
-        # libout123/libsyn123, so the offending link never happens and the
-        # decode library is unchanged.
-        libmpg123 = prev.libmpg123.overrideAttrs (o: {
-          configureFlags = (o.configureFlags or [ ])
-            ++ [ "--disable-components" "--enable-libmpg123" ];
-          # With only the library built there are no man pages, so the
-          # recipe's declared `man` output would be empty and nix errors
-          # ("failed to produce output path"). Materialize it.
-          postInstall = (o.postInstall or "") + ''
-            mkdir -p "$man"
-          '';
-        });
+        # libmpg123 (via libsndfile): nix-lib's fix, the same ffmpeg and
+        # vorbis-tools use.
+        libmpg123 = ulib.nativeFixes.mpg123 prev;
       };
     in
     ulib.mkStandaloneFlake {
@@ -181,18 +166,9 @@
       build = pkgs:
         let
           ps = pkgs.pkgsStatic.extend (final: prev: codecFixes final prev // {
-            # fftw (single, pulled via libpulseaudio's equalizer module) forces
-            # --enable-openmp and links llvmPackages.openmp, but the engine's
-            # self-contained clang has no OpenMP runtime → configure aborts
-            # ("don't know how to enable OpenMP"). The OpenMP variant
-            # (libfftw3f_omp) is unused — pulseaudio links the serial libfftw3f —
-            # so drop OpenMP and keep pthreads threading (--enable-threads).
-            fftwFloat = prev.fftwFloat.overrideAttrs (o: {
-              configureFlags = final.lib.filter (f: f != "--enable-openmp")
-                (o.configureFlags or [ ]);
-              buildInputs = final.lib.filter (d: (d.pname or "") != "openmp")
-                (o.buildInputs or [ ]);
-            });
+            # fftw (single, via libpulseaudio's equalizer module): nix-lib's
+            # fix, the same ffmpeg and vorbis-tools use.
+            fftwFloat = ulib.nativeFixes.fftw (prev // { fftw = prev.fftwFloat; });
           });
           audioLibao = import ./audio.nix { lib = pkgs.lib // ulib; } ps;
 
