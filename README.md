@@ -70,7 +70,9 @@ The [Releases](https://github.com/unpins/sox/releases) page has standalone binar
 - The `ladspa` effect and the `--magic` option are not included: LADSPA plugins
   are shared libraries, which a single self-contained binary can't load, and
   `--magic` needs a libmagic database.
-- The AMR-NB and AMR-WB formats are not included; their codecs are not free
-  software.
+- Not included, because nixpkgs leaves them off too: the GSM and AMR-NB/AMR-WB
+  formats (the AMR libraries nixpkgs provides are not free software), MP2
+  encoding (MP2 decoding works), and reading MP3 ID3 tags — `soxi` shows no
+  title or artist, though SoX still writes them when it encodes an MP3.
 - MP3 encoding (LAME) is included.
 - Windows is built with mingw.
