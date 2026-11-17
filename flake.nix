@@ -15,15 +15,13 @@
   # the multicall program below, which is what the embed announces so unpin
   # recreates them at install.
   #
-  # Live audio in a fully-static binary is the hard part. SoX's OWN device backends
-  # (alsa.c / pulseaudio.c) can't carry it: the static ALSA backend dies on a modern
-  # PulseAudio/PipeWire desktop because libasound dlopen's its routing module
-  # (libasound_module_pcm_pipewire.so) — impossible under static musl — so the
-  # `default` pcm has no device. SoX's pulseaudio backend is linked too (its bare
-  # `-lpulse` link test gets the static chain through LIBPULSEAUDIO_LIBS) and is
-  # what `rec` uses; playback goes through libao below.
+  # Live audio in a fully-static binary is the hard part. SoX's own device
+  # backends are linked: its pulseaudio backend (the bare `-lpulse` link test
+  # gets the static chain through LIBPULSEAUDIO_LIBS) is what `rec` reaches
+  # first, and its alsa backend opens devices through audio.nix's alsaStatic,
+  # whose configuration is compiled in.
   #
-  # So we route SoX's playback through libao instead, reusing the exact built-in
+  # SoX's playback goes through libao, reusing the exact built-in
   # static-driver libao proven for unpins/vorbis-tools (./audio.nix: pulse + alsa +
   # oss compiled INTO libao.a as static_drivers[], pulse(50)>alsa(35)>oss(20) on
   # Linux, macosx on Darwin — recipes reference-libao-static-builtin-drivers +
@@ -36,11 +34,11 @@
   #     `AC_CHECK_LIB(ao, ao_play, …, other-libs=$LIBAO_LIBS)` link test (and the
   #     final link) see libao's full static chain (libpulse-simple/alsa). A bare
   #     `-lao` test would fail-link → libao silently dropped.
-  #   - default-playback-libao.patch makes libao the default PLAYBACK device (`play`,
-  #     `sox -d` as output) when AUDIODRIVER is unset, instead of SoX's broken
-  #     native alsa default. Recording can't use libao, so `rec` still walks
+  #   - default-playback-libao.patch makes libao the default PLAYBACK device
+  #     (`play`, `sox -d` as output) when AUDIODRIVER is unset, so it follows
+  #     libao's pulse>alsa>oss choice. Recording can't use libao, so `rec` still walks
   #     set_default_device(), which reaches SoX's pulseaudio backend first on Linux
-  #     and coreaudio on macOS. (Inert on Windows, where libao isn't compiled and
+  #     and coreaudio on macOS. (Not applied on Windows, where libao isn't compiled and
   #     the native waveaudio backend handles playback and recording.)
   #
   # enableLame = true turns on MP3 *encode* (off by default in nixpkgs); MP3 decode
