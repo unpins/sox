@@ -285,7 +285,7 @@
             buildInputs = builtins.map metaAllow (old.buildInputs or [ ])
               ++ [ mc.libmpg123 ];
             # Piped type detection, same as the native build; and pipes must not
-            # count as seekable (msvcrt's fseek succeeds on them).
+            # count as seekable (UCRT's fseek succeeds on them).
             patches = (old.patches or [ ]) ++ [ ./pipe-detect.patch ./windows-pipe-seekable.patch ];
             # Same bare `-lsndfile` link test as the native build: without the
             # static chain it fails, and the sndfile formats (caf, w64, paf, …)
