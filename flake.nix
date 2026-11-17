@@ -103,24 +103,6 @@
         # the package set. Inert on every other platform (just widens a match
         # list). Same nativeFixes.libopus opus-tools uses.
         libopus = ulib.nativeFixes.libopus prev;
-        # lame's `#ifdef HAVE_XMMINTRIN_H` SSE paths (libmp3lame/{vector/
-        # xmm_quantize_sub,fft,quantize,lame}.c use `__m128`) don't compile on
-        # the i686 target's -march=i686 baseline (no SSE). configure defines
-        # HAVE_XMMINTRIN_H anyway: its probe compiles `_mm_sfence()` with
-        # clang's *default* i686 flags (SSE2-capable) BEFORE lame appends
-        # -march=i686 to CFLAGS, so it passes where the real -march=i686
-        # compile fails (gcc doesn't false-positive here). The i686 target
-        # deliberately assumes no SSE, so undefine the macro post-configure —
-        # every SSE block then compiles as its scalar fallback (the code ARM/
-        # PPC already use; MP3 encode unchanged). Gated to i686; x86_64 (SSE2
-        # baseline) keeps the vectorized paths and its hash.
-        lame = if final.stdenv.hostPlatform.isx86_32
-          then prev.lame.overrideAttrs (o: {
-            postConfigure = (o.postConfigure or "") + ''
-              sed -i '/#define HAVE_XMMINTRIN_H 1/d' config.h
-            '';
-          })
-          else prev.lame;
         # libvorbis' 32-bit-x86 CFLAGS case hardcodes `-mno-ieee-fp`, a
         # GCC-only flag the engine clang rejects as a fatal unknown argument
         # (x86_64 takes a different case, so it's unaffected). The flag only
