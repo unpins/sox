@@ -1,0 +1,30 @@
+libmad's configure.ac adds GCC tuning flags (-fforce-addr, -fthread-jumps,
+-fcse-follow-jumps, …) in its `$GCC = yes` branch, which the engine's clang
+also takes, since it defines __GNUC__. clang rejects them as unknown
+arguments, so the build stopped at its first compile. They are GCC
+micro-tuning; clang's own -O2 replaces them. nixpkgs already strips
+-fforce-mem the same way.
+
+--- a/configure.ac
++++ b/configure.ac
+@@ -141,20 +141,13 @@
+ 	-O|"-O "*)
+ 	    optimize="-O"
+ 	    optimize="$optimize -fforce-mem"
+-	    optimize="$optimize -fforce-addr"
+ 	    : #x optimize="$optimize -finline-functions"
+ 	    : #- optimize="$optimize -fstrength-reduce"
+-	    optimize="$optimize -fthread-jumps"
+-	    optimize="$optimize -fcse-follow-jumps"
+-	    optimize="$optimize -fcse-skip-blocks"
+ 	    : #x optimize="$optimize -frerun-cse-after-loop"
+ 	    : #x optimize="$optimize -frerun-loop-opt"
+ 	    : #x optimize="$optimize -fgcse"
+-	    optimize="$optimize -fexpensive-optimizations"
+-	    optimize="$optimize -fregmove"
+ 	    : #* optimize="$optimize -fdelayed-branch"
+ 	    : #x optimize="$optimize -fschedule-insns"
+-	    optimize="$optimize -fschedule-insns2"
+ 	    : #? optimize="$optimize -ffunction-sections"
+ 	    : #? optimize="$optimize -fcaller-saves"
+ 	    : #> optimize="$optimize -funroll-loops"

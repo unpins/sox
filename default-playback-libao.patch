@@ -1,0 +1,22 @@
+Make libao the default playback device when AUDIODRIVER is unset.
+
+SoX's own ALSA default cannot open a device in a static binary on a
+PulseAudio/PipeWire desktop, so playback (`play`, `sox -d` as output) goes
+through libao, whose built-in drivers pick pulse, then ALSA, then OSS.
+A non-zero `file_count` means this is not `rec`'s input: libao can't record,
+so recording still walks the native backends below.
+
+filetype is set directly rather than through try_device(): try_device opens
+the handler with a zeroed format (rate 0), and libao's startwrite divides by
+the rate (SIGFPE). The real open later uses the true format.
+
+--- a/src/sox.c
++++ b/src/sox.c
+@@ -2536,6 +2536,7 @@
+ {
+   /* Default audio driver type in order of preference: */
+   if (!f->filetype) f->filetype = getenv("AUDIODRIVER");
++  if (!f->filetype && file_count) f->filetype = "ao";
+   if (!f->filetype) f->filetype = try_device("coreaudio");
+   if (!f->filetype) f->filetype = try_device("pulseaudio");
+   if (!f->filetype) f->filetype = try_device("alsa");

@@ -1,3 +1,10 @@
+SoX 14.4.2 detects a piped input's type by reading the first bytes and then
+rewinding stdio's buffer through libc-private FILE fields, which only the
+glibc and BSD layouts have. On musl the rewind is compiled out and on mingw
+it corrupts the stream, so `cat x.wav | sox - y.flac` failed on Linux and
+Windows. Keep the detection bytes and hand them to the handler's first
+reads instead (the approach sox_ng takes).
+
 diff --git a/src/formats.c b/src/formats.c
 index a08a74c..fccdb9e 100644
 --- a/src/formats.c

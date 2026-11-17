@@ -36,7 +36,7 @@
   #     `AC_CHECK_LIB(ao, ao_play, …, other-libs=$LIBAO_LIBS)` link test (and the
   #     final link) see libao's full static chain (libpulse-simple/alsa). A bare
   #     `-lao` test would fail-link → libao silently dropped.
-  #   - a substitution in sox.c makes libao the default PLAYBACK device (`play`,
+  #   - default-playback-libao.patch makes libao the default PLAYBACK device (`play`,
   #     `sox -d` as output) when AUDIODRIVER is unset, instead of SoX's broken
   #     native alsa default. Recording can't use libao, so `rec` still walks
   #     set_default_device(), which reaches SoX's pulseaudio backend first on Linux
@@ -103,29 +103,15 @@
         # the package set. Inert on every other platform (just widens a match
         # list). Same nativeFixes.libopus opus-tools uses.
         libopus = ulib.nativeFixes.libopus prev;
-        # libvorbis' 32-bit-x86 CFLAGS case hardcodes `-mno-ieee-fp`, a
-        # GCC-only flag the engine clang rejects as a fatal unknown argument
-        # (x86_64 takes a different case, so it's unaffected). The flag only
-        # relaxes IEEE FP strictness for -ffast-math (already on); drop it so
-        # the i686 build compiles. Gated to i686 to keep other hashes.
+        # libvorbis: see the patch. Gated so other arches keep their hash.
         libvorbis = if final.stdenv.hostPlatform.isx86_32
           then prev.libvorbis.overrideAttrs (o: {
-            postPatch = (o.postPatch or "") + ''
-              substituteInPlace configure --replace-fail ' -mno-ieee-fp' ""
-            '';
+            patches = (o.patches or [ ]) ++ [ ./libvorbis-i686-no-ieee-fp.patch ];
           })
           else prev.libvorbis;
-        # libmad's configure.ac appends a fistful of GCC-tuning flags
-        # (-fcse-follow-jumps/-fregmove/…) in its `$GCC = yes` branch — which
-        # the engine clang also takes (it sets __GNUC__), but clang rejects
-        # those flags as fatal "unknown argument". nixpkgs already strips
-        # -fforce-mem and re-runs autoconf; strip the remaining clang-hostile
-        # ones the same way (they're gcc micro-tuning; clang's -O2 covers it,
-        # decode output unchanged).
+        # libmad: see the patch.
         libmad = prev.libmad.overrideAttrs (o: {
-          postPatch = (o.postPatch or "") + ''
-            sed -i -E 's/-f(force-addr|thread-jumps|cse-follow-jumps|cse-skip-blocks|expensive-optimizations|regmove|schedule-insns2)//g' configure.ac
-          '';
+          patches = (o.patches or [ ]) ++ [ ./libmad-clang-flags.patch ];
         });
         # libmpg123 (via libsndfile): nix-lib's fix, the same ffmpeg and
         # vorbis-tools use.
@@ -187,13 +173,9 @@
             libpulseaudio = audioLibao.libpulse or null;
             enableLame = true;
           }).overrideAttrs (o: {
-            # SoX 14.4.2 detects a piped file's type by rewinding stdio's buffer
-            # through libc-private FILE fields, which only glibc/BSD layouts have:
-            # on musl the rewind is compiled out and on mingw it corrupts the
-            # stream, so `cat x.wav | sox - y.flac` failed on Linux and Windows.
-            # Keep the detection bytes and hand them to the handler instead (the
-            # sox_ng fix).
-            patches = (o.patches or [ ]) ++ [ ./pipe-detect.patch ];
+            # Piped type detection and libao as the default playback device:
+            # see the patches.
+            patches = (o.patches or [ ]) ++ [ ./pipe-detect.patch ./default-playback-libao.patch ];
             # Two options that can never work in this binary, left out so SoX
             # says so instead of failing obscurely: LADSPA plugins are shared
             # libraries, which a static binary can't load, and `--magic` reads
@@ -263,21 +245,6 @@
               export LIBPULSEAUDIO_LIBS="$(''${PKG_CONFIG:-pkg-config} --static --libs libpulse-simple)"
               echo "unpins: LIBPULSEAUDIO_LIBS=$LIBPULSEAUDIO_LIBS"
               [ -n "$LIBPULSEAUDIO_LIBS" ] || { echo "unpins: pkg-config could not resolve libpulse-simple.pc"; exit 1; }
-            '';
-            # Make libao the default PLAYBACK device (file_count>0 ⇒ not `rec`,
-            # which libao can't do — recording falls through to the native
-            # backends below). We set filetype="ao" directly instead of via
-            # try_device(): try_device probes the handler with a ZEROED format
-            # (rate=0), and libao's startwrite divides by the rate → SIGFPE. The
-            # real open later uses the true format, and libao's own pulse(50)→
-            # alsa(35)→oss(20) test()/priority selection picks the live server
-            # (pulse/pipewire socket) or falls to ALSA hw/dmix on bare metal.
-            postPatch = (o.postPatch or "") + ''
-              substituteInPlace src/sox.c \
-                --replace-fail \
-                  'if (!f->filetype) f->filetype = getenv("AUDIODRIVER");' \
-                  'if (!f->filetype) f->filetype = getenv("AUDIODRIVER");
-                if (!f->filetype && file_count) f->filetype = "ao";'
             '';
             postConfigure = (o.postConfigure or "") + mainBitcode
               # pkgsStatic on darwin can't suppress libtool's shared build (no
