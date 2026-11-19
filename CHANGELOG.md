@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Linux, ALSA's `pipewire` device (`rec -t alsa pipewire`) failed with
+  `Connection refused`; it now reaches PipeWire like `default` does.
+
 ## [unstable-2021-05-09-2] - 2026-09-26
 
 ### Changed

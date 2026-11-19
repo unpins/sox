@@ -18,16 +18,15 @@
   # Live audio in a fully-static binary is the hard part. SoX's own device
   # backends are linked: its pulseaudio backend (the bare `-lpulse` link test
   # gets the static chain through LIBPULSEAUDIO_LIBS) is what `rec` reaches
-  # first, and its alsa backend opens devices through audio.nix's alsaStatic,
-  # whose configuration is compiled in.
+  # first, and its alsa backend opens devices through nix-lib's alsaStatic
+  # (audio.nix), whose configuration is compiled in.
   #
-  # SoX's playback goes through libao, reusing the exact built-in
-  # static-driver libao proven for unpins/vorbis-tools (./audio.nix: pulse + alsa +
-  # oss compiled INTO libao.a as static_drivers[], pulse(50)>alsa(35)>oss(20) on
-  # Linux, macosx on Darwin — recipes reference-libao-static-builtin-drivers +
-  # reference-static-libpulse-client-recipe). libao's own test()/ao_default_driver_id
-  # probing connects to the pulse/pipewire socket when present and falls to ALSA
-  # hw/dmix on bare metal — no dlopen, no daemon lib on disk.
+  # SoX's playback goes through nix-lib's libao (`unpinAudio`, shared with
+  # vorbis-tools): pulse + alsa + oss compiled INTO libao.a as static_drivers[],
+  # pulse(50)>alsa(35)>oss(20) on Linux, macosx on Darwin. libao's own
+  # test()/ao_default_driver_id probing connects to the pulse/pipewire socket
+  # when present and falls to ALSA hw/dmix on bare metal — no dlopen, no daemon
+  # lib on disk.
   #
   # Two wires make SoX use it:
   #   - preConfigure exports LIBAO_LIBS from `pkg-config --static --libs ao` so SoX's
@@ -146,7 +145,7 @@
         "unstable-2021-05-09-lib"
       ];
 
-      # Native (Linux + Darwin). Playback via the ./audio.nix built-in-driver libao.
+      # Native (Linux + Darwin). Playback via nix-lib's built-in-driver libao.
       build = pkgs:
         let
           ps = pkgs.pkgsStatic.extend (final: prev: codecFixes final prev // {
@@ -154,7 +153,7 @@
             # fix, the same ffmpeg and vorbis-tools use.
             fftwFloat = ulib.nativeFixes.fftw (prev // { fftw = prev.fftwFloat; });
           });
-          audioLibao = import ./audio.nix { lib = pkgs.lib // ulib; } ps;
+          audioLibao = ulib.unpinAudio ps;
 
           sox = (ps.sox.override {
             stdenv = engStdenv pkgs;
